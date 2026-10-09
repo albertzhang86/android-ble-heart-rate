@@ -4,9 +4,17 @@ plugins {
     id("org.jetbrains.kotlin.jvm") version "2.1.20" apply false
 }
 
+// Keep generated classes outside cloud-synced folders when configured locally.
+val localSettings = java.util.Properties().apply {
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+}
+val externalBuildRoot = providers.gradleProperty("heartRate.buildRoot").orNull
+    ?: localSettings.getProperty("heartRate.buildRoot")
+
 allprojects {
     group = "io.github.albertzhang86.heartrate"
     version = "0.1.0-SNAPSHOT"
+    if (externalBuildRoot != null) layout.buildDirectory.set(file("$externalBuildRoot/${project.name}"))
 }
 
 subprojects {

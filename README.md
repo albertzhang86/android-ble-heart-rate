@@ -25,6 +25,9 @@ readings, device addresses, credentials, or consumer-app source are bundled in t
 Use JDK 17 or newer and Android SDK 35. Set `ANDROID_HOME` or add an ignored
 `local.properties` with your `sdk.dir`. Open this directory directly in Android Studio.
 
+For a cloud-synced checkout, optionally set `heartRate.buildRoot=/tmp/heart-rate-build`
+in that same ignored file. This keeps generated classes outside the synced source folder.
+
 ```sh
 ./gradlew :heartrate-core:test :heartrate-testing:test \
   :heartrate-android:testDebugUnitTest :heartrate-android:assembleRelease :heartrate-android:lintDebug
