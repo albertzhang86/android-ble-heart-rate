@@ -3,17 +3,18 @@
 A Java-extensible Kotlin library for Android apps that consume Bluetooth Low Energy heart-rate sensors.
 No screens, Compose, account system, workout logic, networking, or data storage.
 
-**Status: initial scaffold. Physical scanning, GATT connection, notification subscription,
-automatic reconnect, and stale-sample detection are not implemented yet.**
-The simulator is functional; it does not exercise Bluetooth. Garmin model compatibility
-has not been verified. ANT+ is outside this project's scope.
+**Status: standard BLE connector implemented; physical-device validation pending.**
+Supports foreground discovery, GATT notification subscription, measurement parsing,
+bounded reconnect, stale-sample detection, and cancellable cleanup. Transport behavior
+is covered by deterministic tests at the Android SDK boundary. No physical Garmin model
+or virtual BLE peripheral has been verified yet. ANT+ is outside this project's scope.
 
 ## Modules
 
 | Module | Responsibility |
 | --- | --- |
 | `heartrate-core` | Plain-Java connector interface, Kotlin Flow facade, models, standard Heart Rate Measurement parser. Pure Kotlin/JVM. |
-| `heartrate-android` | Android BLE capability/permission preflight and standard GATT identifiers; home for the future transport. |
+| `heartrate-android` | Standard BLE connector, Android capability/permission checks, scanner and GATT transport. |
 | `heartrate-testing` | Plain-Java fake connector, simulated monitor, reusable connector contract test fixtures. Keep out of release builds. |
 
 Dependencies flow from Android/testing to core. The consuming app owns views, lifecycle,
@@ -64,6 +65,83 @@ Gradle substitutes the included projects for those coordinates. The Git commit p
 the app determines the source version. For local artifact experiments, `./gradlew publishToMavenLocal`
 publishes JARs/AARs and sources; it does not publish anything publicly.
 
+## Connect a BLE sensor
+
+Use the same connector for sensors that implement the standard Heart Rate Service.
+The app obtains runtime permissions and handles device selection. `readiness()`
+reports what the app needs to resolve before scanning; it never opens a prompt.
+
+```kotlin
+import io.github.albertzhang86.heartrate.ConnectorHeartRateMonitor
+import io.github.albertzhang86.heartrate.android.AndroidBleEnvironment
+import io.github.albertzhang86.heartrate.android.BleReadiness
+import io.github.albertzhang86.heartrate.android.StandardBleHeartRateConnector
+import io.github.albertzhang86.heartrate.connector.ConnectorException
+import kotlinx.coroutines.launch
+
+// Keep one monitor per owning feature, not one per render or scan.
+val monitor = ConnectorHeartRateMonitor(StandardBleHeartRateConnector(context))
+
+if (AndroidBleEnvironment(context).readiness() == BleReadiness.Ready) {
+    val scanJob = scope.launch {
+        try {
+            monitor.scan().collect { devices ->
+                // Offer this current list to the app's device picker.
+            }
+        } catch (error: ConnectorException) {
+            // Map error.code to the app's retry / permission / Bluetooth action.
+        }
+    }
+    // scanJob.cancel() stops discovery early; otherwise it completes after 10 seconds.
+}
+
+// On selection, pass a HeartRateDevice from the latest discovery results:
+// monitor.connect(selectedDevice)
+// Connection stops active scans. Observe state; connect() does not imply success.
+scope.launch {
+    monitor.state.collect { state ->
+        val bpm = state.latestSample?.measurement?.beatsPerMinute
+        // A null sample means there is no current reading. Do not keep displaying the old BPM.
+        // state.connection distinguishes Connecting, Connected, Reconnecting and Failed.
+    }
+}
+
+// On an explicit disconnect: monitor.disconnect()
+// When the owner is disposed: cancel its observation jobs and call monitor.close().
+```
+
+Java consumers can use `new StandardBleHeartRateConnector(context)` directly with
+the `HeartRateConnector.ScanObserver` and `ConnectionObserver` callbacks. Callbacks
+run on Android's main looper; return promptly and do expensive work elsewhere.
+Scan and connection handles can be closed from any thread. Closing immediately
+suppresses new observer deliveries and queues native cleanup on that looper.
+
+The connector owns one sensor connection. It declares the sensor connected only after
+service discovery and successful acknowledgement of the 0x2902 subscription to
+0x2A37 notifications. Early notifications during that subscription are buffered until
+acknowledgement. Unsupported services and malformed packets fail explicitly.
+
+`BleHeartRateOptions` makes these policies configurable:
+
+| Policy | Default |
+| --- | --- |
+| Discovery | 10 seconds; filter advertised Heart Rate Service UUID; deduplicate device IDs |
+| Connect + discovery + subscription deadline | 15 seconds per attempt |
+| Stale reading | Clear the current sample after 10 seconds without a valid notification |
+| Silent sensor | Reconnect after 30 seconds without a valid notification |
+| Retry | 3 retries after the initial attempt, delayed 1, 2, then 4 seconds |
+| Backoff cap | 8 seconds when configured for more retries |
+
+Each valid measurement resets the retry budget. Retry only applies to connection failures
+and timeouts. Missing permissions, disabled Bluetooth, unsupported sensors, and invalid
+packets are terminal errors; the app resolves the cause and starts a new connection.
+Availability is checked before operations and once per second during active sessions.
+
+Set `filterByHeartRateService = false` only for sensors that omit their service UUID
+from advertisements. This returns other connectable BLE devices too; the connector
+still validates the Heart Rate Service on connection. Device IDs are connector-local
+addresses for this implementation and must not be logged or treated as permanent identities.
+
 ## Simulated monitor
 
 ```kotlin
@@ -81,7 +159,7 @@ applicationScope.launch {
 monitor.close()
 ```
 
-The simulated monitor uses the same connector facade as future physical connectors. The caller supplies the coroutine scope. The simulator creates a child job, emits
+The simulated monitor uses the same connector facade as the BLE connector. The caller supplies the coroutine scope. The simulator creates a child job, emits
 112–129 BPM by default, clears its sample on disconnect/close, and never cancels the
 parent scope. Tests can supply a virtual-time dispatcher, sample list, interval, and clock.
 It is an in-process fake, not a virtual BLE peripheral.
@@ -102,7 +180,7 @@ See [the connector guide](docs/CONNECTORS.md), the executable
 [Java fake](heartrate-testing/src/main/java/io/github/albertzhang86/heartrate/testing/FakeHeartRateConnector.java),
 and [compatibility matrix](docs/COMPATIBILITY.md). Use the standard BLE connector when a
 sensor speaks the standard Heart Rate Service; add a vendor-specific connector only for
-differences in protocol or transport. The standard BLE transport is the next milestone.
+differences in protocol or transport.
 
 ## Android boundary
 
@@ -113,17 +191,18 @@ does not grant permissions or enable radios. The manifest declares BLE as option
 
 The permission policy is foreground scanning: Android 12+ uses Nearby devices; Android
 8–11 uses foreground location. No background-location permission is declared. The library
-does not derive location from scan results. A future background connection policy must
-also account for the consuming app's lifecycle and Android service requirements.
+does not derive location from scan results. `readiness(forScan = false)` and
+`requiredForConnection()` check the narrower connection requirements. Location services
+are required for legacy scanning, not for keeping a selected sensor connected.
+
+The consuming app owns background execution. This library starts no foreground service
+and makes no guarantee that Android will keep its process alive. Apps that continue
+training over another TV app must provide an appropriate lifecycle/service integration.
 
 ## Next milestones
 
-1. Foreground scanner with service filtering, cancellation, timeout, and device deduplication.
-2. Single-sensor GATT transport: discover service 0x180D, subscribe to 0x2A37 through CCCD,
-   feed notifications through the tested parser, and cleanly release resources.
-3. Connection failure model, bounded reconnect, freshness, and adapter-off/permission-revocation handling.
-4. Virtual BLE tests with Bumble/Netsim, then compatibility checks on actual Android TV + Garmin hardware.
-5. Versioned releases and Maven Central distribution.
+1. Virtual BLE tests with Bumble/Netsim, then compatibility checks on actual Android TV + Garmin hardware.
+2. Versioned releases and Maven Central distribution.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for boundaries and checks.
 

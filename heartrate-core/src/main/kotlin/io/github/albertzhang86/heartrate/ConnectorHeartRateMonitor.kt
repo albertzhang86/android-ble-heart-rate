@@ -38,6 +38,7 @@ class ConnectorHeartRateMonitor(
                     Unit
                 }
                 override fun onError(error: ConnectorException) { close(error) }
+                override fun onScanCompleted() { close() }
             })
         } catch (error: Exception) {
             synchronized(lock) { scans.remove(stop) }
@@ -74,6 +75,15 @@ class ConnectorHeartRateMonitor(
 
             override fun onDisconnected() { finish(token, HeartRateConnection.Disconnected) }
             override fun onError(error: ConnectorException) { finish(token, HeartRateConnection.Failed(error)) }
+            override fun onReconnecting(attempt: Int) = synchronized(lock) {
+                if (token == generation && !closed) {
+                    mutableState.value = HeartRateState(
+                        HeartRateConnection.Reconnecting(device, attempt), isSimulated = connector.isSimulated)
+                }
+            }
+            override fun onMeasurementUnavailable() = synchronized(lock) {
+                if (token == generation && !closed) mutableState.value = state.value.copy(latestSample = null)
+            }
         }
         try {
             val started = connector.connect(device, observer)

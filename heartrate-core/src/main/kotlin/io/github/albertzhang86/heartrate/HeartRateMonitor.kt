@@ -26,6 +26,7 @@ sealed interface HeartRateConnection {
     data object Disconnected : HeartRateConnection
     data class Failed(val error: io.github.albertzhang86.heartrate.connector.ConnectorException) : HeartRateConnection
     data class Connecting(val device: HeartRateDevice) : HeartRateConnection
+    data class Reconnecting(val device: HeartRateDevice, val attempt: Int) : HeartRateConnection
     data class Connected(val device: HeartRateDevice) : HeartRateConnection
 }
 

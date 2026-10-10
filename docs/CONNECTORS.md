@@ -10,13 +10,13 @@ The public contract provides:
 
 - A stable namespaced connector ID.
 - Discovery callbacks with opaque device IDs and optional names.
-- A connection callback, measurements, disconnect notification, and typed errors.
+- Connection readiness, measurements, optional freshness/reconnecting events, terminal disconnect, and typed errors.
 - Closeable scan/connection handles and terminal connector cleanup.
 - Explicit simulation provenance (real by default).
 
 The Kotlin `ConnectorHeartRateMonitor` wraps any implementation in the same `StateFlow`
 API and discards callbacks from replaced connections. It timestamps received samples,
-clears readings on disconnect/error, and closes scan sessions when collection stops.
+clears readings on disconnect/error/reconnect/staleness, and closes scan sessions when collection stops or discovery completes.
 It owns its connector. Serialize its connect/disconnect/close calls on the owner's
 thread; connector callbacks may arrive from platform threads.
 
@@ -32,6 +32,9 @@ Convert units in the connector; the app should not need vendor-specific parsing.
    Transport timeouts and permissions belong in that connector/platform integration.
 3. Return promptly from scan/connect. Report success only when the sensor is ready.
    Deliver callbacks in order: connected, measurements, then disconnected or error.
+   For recoverable interruptions, send `onReconnecting(attempt)` (one-based), then
+   `onConnected()` before resuming measurements. Send `onMeasurementUnavailable()`
+   when a previous reading is stale. Both events immediately clear the facade's sample.
 4. Make each returned handle's close operation idempotent, non-blocking, and release
    its underlying callbacks/resources. Connector close cleans up all handles.
 5. Use `ConnectorException.Code` for errors. Do not log device identifiers or measurements.
@@ -39,9 +42,40 @@ Convert units in the connector; the app should not need vendor-specific parsing.
    registry, reflection, hardcoded Garmin selection, or app-specific dependency.
 
 A monitor using the standard BLE Heart Rate Service should share the standard BLE
-implementation once available. A new brand alone does not require a connector fork.
+`StandardBleHeartRateConnector` implementation. A new brand alone does not require a connector fork.
 Alternative protocols can implement the same interface in a separate module with
 their own permissions and dependencies.
+
+## Standard BLE implementation
+
+The Android module separates platform calls from connection policy:
+
+- `StandardBleHeartRateConnector` is the public Java-compatible entry point.
+- `internal/AndroidBlePlatform` owns Android scanner/GATT objects, permission race
+  handling, service validation and both legacy and Android 13+ notification callbacks.
+- `internal/BleScanSession` owns scan lifetime, deduplication and bounded discovery.
+- `internal/BleConnectionSession` owns the connection handshake, freshness and retries.
+- `internal/ManagedSession` gates late callbacks and cleanup; `HandlerScheduler`
+  serializes Android work on the main looper.
+
+The `BlePlatform` and `Scheduler` boundaries are internal test seams, not public vendor
+extension APIs. Use `HeartRateConnector` for another protocol. Do not subclass or
+fork the standard BLE internals merely to add a sensor brand.
+
+Session `close()` must stop new observer deliveries immediately, including already
+queued events. Native resource disposal may be queued. Keep callbacks short and do
+not wait for other threads from a callback. Terminal errors must release resources;
+manual close does not need to send a disconnect callback. A finite scan ends with
+`onScanCompleted()`, which completes the facade's Flow normally. Cancelling collection
+stops scanning without a completion callback.
+
+### Migration from the initial scaffold
+
+The three new observer methods (`onScanCompleted`, `onReconnecting`, and
+`onMeasurementUnavailable`) have Java default implementations, so existing connector
+implementations still compile. Consumers with exhaustive Kotlin `when` expressions
+over `HeartRateConnection` must handle the new `Reconnecting` case. Reconnect attempts
+belong to the same session; do not discard its handle until a terminal event or close.
 
 ## Shared contract tests
 
@@ -62,6 +96,12 @@ connection-before-measurement ordering, no delivery after closing, and idempoten
 Also test timeouts, cancellation, unexpected disconnection, malformed packets,
 permission revocation, and queued callbacks from old connections as applicable.
 Use a fake transport to run CI without owning every supported sensor.
+
+The standard BLE tests use a deterministic event loop and an injected fake at the
+Android SDK boundary. They cover descriptor acknowledgement ordering, early packets,
+deadlines, retry exhaustion/reset, stale readings, permission/radio failures, replacing
+connections, and cancellation with queued events. They do not exercise the real Android
+Bluetooth stack; use the [hardware checklist](HARDWARE_TESTING.md) for qualification.
 
 ## Hardware reports
 

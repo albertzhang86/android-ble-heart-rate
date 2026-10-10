@@ -41,6 +41,52 @@ class ConnectorHeartRateMonitorTest {
         monitor.close()
     }
 
+    @Test fun `reconnect clears old data and accepts fresh readings after connection`() {
+        val connector = RecordingConnector()
+        val monitor = ConnectorHeartRateMonitor(connector)
+        monitor.connect(FakeHeartRateConnector.DEVICE)
+        val listener = connector.listeners.single()
+        listener.onMeasurement(HeartRateMeasurement(90))
+        listener.onReconnecting(1)
+        assertEquals(HeartRateConnection.Reconnecting(FakeHeartRateConnector.DEVICE, 1), monitor.state.value.connection)
+        assertNull(monitor.state.value.latestSample)
+        listener.onMeasurement(HeartRateMeasurement(190))
+        assertNull(monitor.state.value.latestSample)
+        listener.onConnected()
+        listener.onMeasurement(HeartRateMeasurement(95))
+        assertEquals(95, monitor.state.value.latestSample?.measurement?.beatsPerMinute)
+        assertEquals(0, connector.connectionCloses)
+        monitor.close()
+    }
+
+    @Test fun `stale measurement clears sample while retaining a usable connection`() {
+        val connector = RecordingConnector()
+        val monitor = ConnectorHeartRateMonitor(connector)
+        monitor.connect(FakeHeartRateConnector.DEVICE)
+        val listener = connector.listeners.single()
+        listener.onMeasurement(HeartRateMeasurement(90))
+        listener.onMeasurementUnavailable()
+        assertTrue(monitor.state.value.connection is HeartRateConnection.Connected)
+        assertNull(monitor.state.value.latestSample)
+        listener.onMeasurement(HeartRateMeasurement(95))
+        assertEquals(95, monitor.state.value.latestSample?.measurement?.beatsPerMinute)
+        monitor.close()
+    }
+
+    @Test fun `bounded scan completes flow and closes its session`() = runTest {
+        val connector = RecordingConnector()
+        val monitor = ConnectorHeartRateMonitor(connector)
+        val results = mutableListOf<List<HeartRateDevice>>()
+        val collection = backgroundScope.launch { monitor.scan().collect { results.add(it) } }
+        runCurrent()
+        connector.scanListeners.single().onScanCompleted()
+        runCurrent()
+        assertTrue(collection.isCompleted)
+        assertEquals(listOf(listOf(FakeHeartRateConnector.DEVICE)), results)
+        assertEquals(1, connector.scanCloses)
+        monitor.close()
+    }
+
     @Test fun `scan cancellation and monitor close release discovery sessions`() = runTest {
         val connector = RecordingConnector()
         val monitor = ConnectorHeartRateMonitor(connector)
@@ -59,10 +105,12 @@ class ConnectorHeartRateMonitorTest {
 
     private class RecordingConnector : HeartRateConnector {
         val listeners = mutableListOf<HeartRateConnector.ConnectionObserver>()
+        val scanListeners = mutableListOf<HeartRateConnector.ScanObserver>()
         var connectionCloses = 0
         var scanCloses = 0
         override fun getId() = "test.recording"
         override fun scan(observer: HeartRateConnector.ScanObserver): HeartRateConnector.Session {
+            scanListeners.add(observer)
             observer.onDeviceDiscovered(FakeHeartRateConnector.DEVICE)
             return HeartRateConnector.Session { scanCloses++ }
         }

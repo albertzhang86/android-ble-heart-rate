@@ -16,15 +16,17 @@ sealed interface BleReadiness {
     data class PermissionsRequired(val permissions: List<String>) : BleReadiness
 }
 
-/** Read-only preflight for foreground scanning. Does not scan, connect, prompt, or change system settings. */
+/** Read-only preflight. Does not scan, connect, prompt, or change system settings. */
 class AndroidBleEnvironment(context: Context) {
     private val context = context.applicationContext
 
-    fun readiness(): BleReadiness {
+    @JvmOverloads
+    fun readiness(forScan: Boolean = true): BleReadiness {
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
             return BleReadiness.Unsupported
         }
-        val missing = HeartRatePermissions.requiredForScan().filter {
+        val permissions = if (forScan) HeartRatePermissions.requiredForScan() else HeartRatePermissions.requiredForConnection()
+        val missing = permissions.filter {
             context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isNotEmpty()) return BleReadiness.PermissionsRequired(missing)
@@ -37,9 +39,9 @@ class AndroidBleEnvironment(context: Context) {
         try {
             if (!adapter.isEnabled) return BleReadiness.BluetoothDisabled
         } catch (_: SecurityException) {
-            return BleReadiness.PermissionsRequired(HeartRatePermissions.requiredForScan())
+            return BleReadiness.PermissionsRequired(permissions)
         }
-        if (Build.VERSION.SDK_INT <= 30 && !locationEnabled()) return BleReadiness.LocationServicesDisabled
+        if (forScan && Build.VERSION.SDK_INT <= 30 && !locationEnabled()) return BleReadiness.LocationServicesDisabled
         return BleReadiness.Ready
     }
 

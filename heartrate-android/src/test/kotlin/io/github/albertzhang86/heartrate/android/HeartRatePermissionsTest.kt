@@ -12,4 +12,9 @@ class HeartRatePermissionsTest {
     @Test fun `legacy Android scanning needs foreground location`() {
         assertEquals(listOf("android.permission.ACCESS_FINE_LOCATION"), HeartRatePermissions.requiredForScan(30))
     }
+
+    @Test fun `connecting does not request scan or legacy location permission`() {
+        assertEquals(listOf("android.permission.BLUETOOTH_CONNECT"), HeartRatePermissions.requiredForConnection(31))
+        assertEquals(emptyList<String>(), HeartRatePermissions.requiredForConnection(30))
+    }
 }
