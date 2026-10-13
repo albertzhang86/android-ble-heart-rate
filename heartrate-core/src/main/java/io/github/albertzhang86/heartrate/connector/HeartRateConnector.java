@@ -34,8 +34,6 @@ public interface HeartRateConnector extends AutoCloseable {
     interface ScanObserver {
         void onDeviceDiscovered(HeartRateDevice device);
         void onError(ConnectorException error);
-        /** A bounded scan ended successfully. No further results arrive for that session. */
-        default void onScanCompleted() {}
     }
 
     interface ConnectionObserver {
@@ -43,9 +41,5 @@ public interface HeartRateConnector extends AutoCloseable {
         void onMeasurement(HeartRateMeasurement measurement);
         void onDisconnected();
         void onError(ConnectorException error);
-        /** The session remains open while the connector retries; previous readings are no longer live. */
-        default void onReconnecting(int attempt) {}
-        /** No recent measurement is available, even though the connection may still be open. */
-        default void onMeasurementUnavailable() {}
     }
 }
